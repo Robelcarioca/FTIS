@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+.github/
+venv/
+env/
+notebooks/.ipynb_checkpoints/
+logs/
+data/cache/
+docs/research/*.pdf

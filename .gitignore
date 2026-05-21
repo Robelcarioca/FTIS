@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# Data and generated artifacts
+data/raw/*.csv
+data/weather/*.csv
+data/processed/*.csv
+logs/*.log
+reports/*.json
+docs/model_results/*
+!docs/model_results/.gitkeep
+models/*.pkl
+models/saved/*.pkl
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

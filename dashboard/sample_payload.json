@@ -1,0 +1,21 @@
+{
+  "request": {
+    "latitude": 39.8729,
+    "longitude": -104.6737,
+    "altitude": 10800,
+    "windspeed": 42,
+    "pressure": 1002,
+    "temperature": -42
+  },
+  "response": {
+    "risk": "High",
+    "confidence": 0.91,
+    "FTI": 82,
+    "recommendation": "Avoid route section or request tactical reroute.",
+    "probabilities": {
+      "Low": 0.03,
+      "Moderate": 0.06,
+      "High": 0.91
+    }
+  }
+}

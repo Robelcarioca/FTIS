@@ -1,0 +1,42 @@
+services:
+  ftis-api:
+    build: .
+    container_name: ftis-api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ftis-cache:/app/data/cache
+      - ftis-logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ftis-dashboard:
+    build: .
+    container_name: ftis-dashboard
+    command: streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
+    env_file:
+      - .env.example
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - ftis-cache:/app/data/cache
+      - ftis-logs:/app/logs
+    depends_on:
+      ftis-api:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  ftis-cache:
+  ftis-logs:

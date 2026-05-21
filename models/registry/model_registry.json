@@ -1,0 +1,13 @@
+{
+  "active_version": "ftis-mvp-1",
+  "versions": [
+    {
+      "version": "ftis-mvp-1",
+      "artifact_path": "models/ftis_model.pkl",
+      "registered_at_utc": "2026-05-20T00:00:00+00:00",
+      "metrics": {
+        "status": "bootstrap registry entry; retraining updates metrics"
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+flowchart TD
+    A["User submits route"] --> B["Resolve airports"]
+    B --> C["Interpolate great-circle waypoints"]
+    C --> D["Generate climb-cruise-descent altitude profile"]
+    D --> E["Sample provider weather with cache"]
+    E --> F["Normalize atmospheric fields"]
+    F --> G["Run FTIS feature engineering"]
+    G --> H["Predict risk and confidence"]
+    H --> I["Compute cumulative FTI"]
+    I --> J["Detect turbulence corridors"]
+    J --> K["Return API, GeoJSON, CSV, dashboard overlays"]

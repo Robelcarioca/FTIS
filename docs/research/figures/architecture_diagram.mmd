@@ -1,0 +1,32 @@
+flowchart LR
+    subgraph Data["Data Sources"]
+        A["Aircraft states"]
+        B["Open-Meteo"]
+        C["NOAA NWS"]
+        D["AviationWeather.gov"]
+    end
+    subgraph Core["FTIS Core"]
+        E["Weather normalization"]
+        F["Route simulation"]
+        G["Feature engineering"]
+        H["FTI scoring"]
+        I["ML inference"]
+        J["Explainability"]
+    end
+    subgraph Ops["Operational Interfaces"]
+        K["FastAPI"]
+        L["Streamlit Operations Center"]
+        M["Research reports"]
+    end
+    A --> G
+    B --> E
+    C --> E
+    D --> E
+    E --> F
+    F --> H
+    G --> H
+    H --> I
+    I --> J
+    I --> K
+    F --> L
+    J --> M
