@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 
@@ -22,7 +23,11 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 DOCS_DIR = PROJECT_ROOT / "docs"
 MODEL_RESULTS_DIR = DOCS_DIR / "model_results"
 LOG_DIR = PROJECT_ROOT / "logs"
-CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+def _path_from_env(name: str, default: Path) -> Path:
+    return Path(os.getenv(name, str(default))).expanduser()
+
+
+CACHE_DIR = _path_from_env("FTIS_CACHE_DIR", PROJECT_ROOT / ".ftis_cache")
 WEATHER_CACHE_DIR = CACHE_DIR / "weather"
 ASSETS_DIR = DOCS_DIR / "assets"
 MODEL_REGISTRY_DIR = MODEL_DIR / "registry"

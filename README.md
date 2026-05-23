@@ -125,6 +125,7 @@ Start the API:
 
 ```bash
 uvicorn api.main:app --reload
+$env:BACKEND_URL="http://localhost:8000"
 ```
 
 Endpoints:
@@ -142,7 +143,7 @@ Endpoints:
 Example request:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST "$BACKEND_URL/predict" \
   -H "Content-Type: application/json" \
   -d '{
     "latitude": 39.8729,
@@ -170,7 +171,7 @@ Example response:
 }
 ```
 
-Interactive API docs are available at `http://localhost:8000/docs`.
+Interactive API docs are available at `$BACKEND_URL/docs`.
 
 ## Dashboard
 
@@ -212,7 +213,7 @@ docker compose up --build
 
 Services:
 
-- API: `http://localhost:8000`
+- API: `$env:BACKEND_URL` or `http://localhost:8000` for local development
 - Dashboard: `http://localhost:8501`
 
 See [docs/deployment.md](docs/deployment.md) for deployment notes and [docs/api_examples.md](docs/api_examples.md) for expanded API examples.

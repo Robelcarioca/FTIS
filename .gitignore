@@ -18,6 +18,7 @@ data/raw/*.csv
 data/weather/*.csv
 data/processed/*.csv
 logs/*.log
+.ftis_cache/
 reports/*.json
 docs/model_results/*
 !docs/model_results/.gitkeep

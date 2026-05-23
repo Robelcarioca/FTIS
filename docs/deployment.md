@@ -10,6 +10,7 @@ python scripts/feature_engineering.py
 python scripts/train_model.py
 python scripts/evaluate_model.py
 uvicorn api.main:app --host 0.0.0.0 --port 8000
+$env:BACKEND_URL="http://localhost:8000"
 streamlit run dashboard/app.py
 ```
 
@@ -22,14 +23,15 @@ docker compose up --build
 
 Services:
 
-- API: http://localhost:8000
-- API docs: http://localhost:8000/docs
+- API: `$env:BACKEND_URL` or `http://localhost:8000`
+- API docs: `$env:BACKEND_URL/docs`
 - Dashboard: http://localhost:8501
 
 ## Deployment Notes
 
 - Mount `models/ftis_model.pkl` as a release artifact for API and dashboard services.
 - Mount `data/cache/` if repeated route weather queries should survive container restarts.
+- Set `BACKEND_URL` for dashboard deployments, for example `https://ftis-api.example.com`.
 - Set `FTIS_REQUIRE_AUTH=true` and rotate `FTIS_JWT_SECRET` before exposing the API publicly.
 - Keep `FTIS_RATE_LIMIT_PER_MINUTE` conservative for public demos.
 - Keep ingestion jobs separate from inference services in production.

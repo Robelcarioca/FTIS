@@ -19,6 +19,6 @@ EXPOSE 8000
 EXPOSE 8501
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD-SHELL curl -fsS ${BACKEND_URL:-http://localhost:8000}/health || exit 1
 
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

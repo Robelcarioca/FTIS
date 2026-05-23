@@ -13,8 +13,9 @@ services:
       - ftis-logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
+      - BACKEND_URL=http://ftis-api:8000
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "curl -fsS $${BACKEND_URL:-http://localhost:8000}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -36,6 +37,7 @@ services:
         condition: service_healthy
     environment:
       - PYTHONUNBUFFERED=1
+      - BACKEND_URL=http://ftis-api:8000
 
 volumes:
   ftis-cache:

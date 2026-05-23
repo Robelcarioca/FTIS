@@ -9,4 +9,5 @@ env/
 notebooks/.ipynb_checkpoints/
 logs/
 data/cache/
+.ftis_cache/
 docs/research/*.pdf

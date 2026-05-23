@@ -9,6 +9,7 @@ Frontend-only architecture:
 from __future__ import annotations
 
 import math
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -22,7 +23,15 @@ import requests
 import streamlit as st
 
 
-DEFAULT_BACKEND_URL = os.getenv("FTIS_BACKEND_URL", "http://localhost:8000/predict")
+DEVELOPMENT_BACKEND_URL = "http://localhost:8000"
+BACKEND_URL_ENV = "BACKEND_URL"
+LEGACY_BACKEND_URL_ENV = "FTIS_BACKEND_URL"
+
+logging.basicConfig(
+    level=os.getenv("FTIS_DASHBOARD_LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("ftis.dashboard")
 
 
 AIRCRAFT_ICON = """
@@ -73,6 +82,31 @@ class PredictionClientError(RuntimeError):
     """Raised when the backend prediction service cannot return a valid result."""
 
 
+def normalize_backend_url(raw_url: str | None) -> str:
+    """Return a backend base URL, accepting either base URLs or /predict URLs."""
+
+    candidate = (raw_url or "").strip() or DEVELOPMENT_BACKEND_URL
+    if not candidate.startswith(("http://", "https://")):
+        candidate = f"http://{candidate}"
+    candidate = candidate.rstrip("/")
+    if candidate.endswith("/predict"):
+        candidate = candidate[: -len("/predict")]
+    return candidate.rstrip("/")
+
+
+def configured_backend_url() -> str:
+    """Read BACKEND_URL from the environment with a local development fallback."""
+
+    return normalize_backend_url(
+        os.getenv(BACKEND_URL_ENV)
+        or os.getenv(LEGACY_BACKEND_URL_ENV)
+        or DEVELOPMENT_BACKEND_URL
+    )
+
+
+DEFAULT_BACKEND_URL = configured_backend_url()
+
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
@@ -90,17 +124,27 @@ def haversine_nm(origin: Station, destination: Station) -> float:
     return 2 * radius_nm * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def backend_base_url(predict_url: str) -> str:
-    parsed = urlparse(predict_url)
+def prediction_endpoint(backend_url: str) -> str:
+    return f"{normalize_backend_url(backend_url)}/predict"
+
+
+def backend_base_url(backend_url: str) -> str:
+    parsed = urlparse(normalize_backend_url(backend_url))
     if not parsed.scheme or not parsed.netloc:
         return ""
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def system_status(predict_url: str) -> dict[str, Any]:
-    base_url = backend_base_url(predict_url)
+def system_status(backend_url: str) -> dict[str, Any]:
+    base_url = backend_base_url(backend_url)
     if not base_url:
-        return {"status": "DEGRADED", "version": "N/A", "model_version": "N/A"}
+        return {
+            "status": "OFFLINE",
+            "version": "N/A",
+            "model_version": "N/A",
+            "latency_ms": None,
+            "message": "Invalid BACKEND_URL",
+        }
 
     for endpoint in ("/system/status", "/health"):
         try:
@@ -115,15 +159,35 @@ def system_status(predict_url: str) -> dict[str, Any]:
                     if isinstance(model, dict)
                     else payload.get("model_version")
                 )
+                raw_status = str(payload.get("status", "ONLINE")).upper()
+                if raw_status in {"HEALTHY", "ONLINE", "OK", "RUNNING"}:
+                    status = "ONLINE"
+                elif raw_status in {"DEGRADED", "WARNING"}:
+                    status = "DEGRADED"
+                else:
+                    status = "DEGRADED"
                 return {
-                    "status": str(payload.get("status", "ONLINE")).upper(),
+                    "status": status,
                     "version": str(payload.get("version", "2.0")),
                     "model_version": str(model_version or payload.get("model", "active")),
                     "latency_ms": latency_ms,
+                    "message": f"Health check passed at {endpoint}",
                 }
-        except requests.RequestException:
+            logger.warning(
+                "Backend health endpoint returned non-OK status url=%s status_code=%s",
+                f"{base_url}{endpoint}",
+                response.status_code,
+            )
+        except requests.RequestException as exc:
+            logger.warning("Backend health check failed url=%s error=%s", f"{base_url}{endpoint}", exc)
             continue
-    return {"status": "DEGRADED", "version": "N/A", "model_version": "N/A", "latency_ms": None}
+    return {
+        "status": "OFFLINE",
+        "version": "N/A",
+        "model_version": "N/A",
+        "latency_ms": None,
+        "message": "Backend health check failed",
+    }
 
 
 def station_by_label(label: str) -> Station:
@@ -206,7 +270,7 @@ def normalize_prediction(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def call_prediction_backend(
-    predict_url: str,
+    backend_url: str,
     departure: Station,
     destination: Station,
     altitude: float,
@@ -223,6 +287,8 @@ def call_prediction_backend(
         windspeed,
     )
     started = time.perf_counter()
+    predict_url = prediction_endpoint(backend_url)
+    logger.info("Sending prediction request backend_url=%s endpoint=%s", normalize_backend_url(backend_url), predict_url)
 
     try:
         response = requests.post(predict_url, json=mission_payload, timeout=8)
@@ -237,13 +303,19 @@ def call_prediction_backend(
             response = requests.post(predict_url, json=compatibility_payload, timeout=8)
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise PredictionClientError(f"Backend prediction request failed: {exc}") from exc
+        logger.exception("Backend prediction request failed endpoint=%s", predict_url)
+        raise PredictionClientError(
+            "Prediction backend is unavailable. Start the FastAPI backend or update BACKEND_URL."
+        ) from exc
 
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
     try:
         payload = response.json()
     except ValueError as exc:
-        raise PredictionClientError("Backend returned a non-JSON response") from exc
+        logger.exception("Backend returned a non-JSON prediction response endpoint=%s", predict_url)
+        raise PredictionClientError(
+            "Prediction backend returned an invalid response. Check backend logs."
+        ) from exc
 
     return normalize_prediction(payload), latency_ms
 
@@ -541,7 +613,13 @@ def render_top_bar(status: dict[str, Any]) -> None:
     api_latency = st.session_state.get("api_latency_ms")
     latency_label = f"{api_latency:.1f} ms" if api_latency is not None else "STANDBY"
     status_text = status.get("status", "DEGRADED")
-    status_color = "#22c55e" if status_text in {"ONLINE", "HEALTHY"} else "#ef4444"
+    status_color = (
+        "#22c55e"
+        if status_text == "ONLINE"
+        else "#facc15"
+        if status_text == "DEGRADED"
+        else "#ef4444"
+    )
     st.markdown(
         f"""
         <div class="top-bar">
@@ -591,8 +669,11 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Backend")
-        backend_url = st.text_input("Prediction API URL", DEFAULT_BACKEND_URL)
-        st.caption("Frontend remains backend-dependent. No local model is loaded.")
+        backend_input = st.text_input("BACKEND_URL", DEFAULT_BACKEND_URL)
+        backend_url = normalize_backend_url(backend_input)
+        logger.info("Active FTIS backend URL: %s", backend_url)
+        st.caption("Set BACKEND_URL in the environment for deployment.")
+        st.code(backend_url, language="text")
 
     status = system_status(backend_url)
     render_top_bar(status)

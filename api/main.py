@@ -27,6 +27,7 @@ from api.schemas import (
     ModelMetricsResponse,
     RouteAnalyzeRequest,
     RouteAnalyzeResponse,
+    StationPredictionRequest,
     SystemStatusResponse,
     TurbulencePredictionRequest,
     TurbulencePredictionResponse,
@@ -47,6 +48,21 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+STATION_COORDINATES: dict[str, tuple[float, float]] = {
+    "ADD": (8.9779, 38.7993),
+    "DIR": (9.6247, 41.8542),
+    "BJR": (11.6081, 37.3216),
+    "MQX": (13.4674, 39.5335),
+    "JIM": (7.6661, 36.8166),
+    "GDQ": (12.5199, 37.4339),
+    "AWA": (7.0670, 38.5000),
+    "DXB": (25.2532, 55.3657),
+    "NBO": (-1.3192, 36.9278),
+    "JED": (21.6796, 39.1565),
+    "FRA": (50.0379, 8.5622),
+}
 
 
 class StructuredLoggingMiddleware(BaseHTTPMiddleware):
@@ -153,12 +169,43 @@ def _to_dict(payload: Any) -> dict[str, Any]:
     return payload.dict()
 
 
+def _prediction_payload(payload: TurbulencePredictionRequest | StationPredictionRequest) -> dict[str, Any]:
+    """Convert supported API prediction payloads into the core model schema."""
+
+    data = _to_dict(payload)
+    if isinstance(payload, StationPredictionRequest):
+        departure = data["departure_station"].upper()
+        destination = data["destination_station"].upper()
+        if departure not in STATION_COORDINATES:
+            raise ValueError(f"Unknown departure station: {departure}")
+        if destination not in STATION_COORDINATES:
+            raise ValueError(f"Unknown destination station: {destination}")
+        dep_lat, dep_lon = STATION_COORDINATES[departure]
+        dst_lat, dst_lon = STATION_COORDINATES[destination]
+        return {
+            "latitude": (dep_lat + dst_lat) / 2,
+            "longitude": (dep_lon + dst_lon) / 2,
+            "altitude": data["altitude"],
+            "windspeed": data["windspeed"],
+            "pressure": data.get("pressure", 1013.25),
+            "temperature": data["temperature"],
+        }
+    return data
+
+
 @app.on_event("startup")
 def startup_validation() -> None:
     """Validate critical runtime directories and model artifact visibility."""
 
     logger.info("FTIS startup root=%s model_available=%s", FTIS_PROJECT_ROOT, MODEL_PATH.exists())
-    weather_service.cache.cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        weather_service.cache.cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Weather cache directory is unavailable; continuing without startup cache validation path=%s error=%s",
+            weather_service.cache.cache_dir,
+            exc,
+        )
 
 
 @app.get("/", tags=["System"])
@@ -190,11 +237,11 @@ def health() -> dict[str, Any]:
     tags=["Prediction"],
     summary="Predict turbulence risk for one aircraft/weather state",
 )
-def predict(payload: TurbulencePredictionRequest) -> dict[str, Any]:
+def predict(payload: TurbulencePredictionRequest | StationPredictionRequest) -> dict[str, Any]:
     """Predict turbulence risk for a flight/weather state."""
 
     try:
-        result = predict_turbulence(_to_dict(payload))
+        result = predict_turbulence(_prediction_payload(payload))
     except FileNotFoundError as exc:
         logger.warning("Prediction requested before model was trained: %s", exc)
         raise HTTPException(
@@ -227,7 +274,7 @@ def predict_batch_endpoint(payload: BatchPredictionRequest) -> dict[str, Any]:
     """Score a bounded batch of aircraft/weather states."""
 
     try:
-        records = [_to_dict(record) for record in payload.records]
+        records = [_prediction_payload(record) for record in payload.records]
         predictions = predict_batch(records)
     except HTTPException:
         raise

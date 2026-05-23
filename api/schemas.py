@@ -103,6 +103,46 @@ class TurbulencePredictionRequest(BaseModel):
             schema_extra = {"example": PREDICTION_EXAMPLE}
 
 
+class StationPredictionRequest(BaseModel):
+    """Station-oriented dashboard payload for backend-dependent prediction."""
+
+    altitude: float = Field(..., ge=0, le=20000, description="Cruising altitude in meters")
+    speed: float = Field(..., ge=0, le=1200, description="Aircraft speed in knots")
+    temperature: float = Field(..., ge=-90, le=60, description="Outside air temperature")
+    windspeed: float = Field(..., ge=0, le=150, description="Wind speed")
+    departure_station: str = Field(..., min_length=3, max_length=4)
+    destination_station: str = Field(..., min_length=3, max_length=4)
+    pressure: float = Field(1013.25, gt=800, lt=1100, description="Pressure fallback")
+
+    if PYDANTIC_V2:
+        model_config = ConfigDict(
+            extra="forbid",
+            json_schema_extra={
+                "example": {
+                    "altitude": 10600,
+                    "speed": 455,
+                    "temperature": -38,
+                    "windspeed": 42,
+                    "departure_station": "ADD",
+                    "destination_station": "DXB",
+                }
+            },
+        )
+    else:
+        class Config:
+            extra = "forbid"
+            schema_extra = {
+                "example": {
+                    "altitude": 10600,
+                    "speed": 455,
+                    "temperature": -38,
+                    "windspeed": 42,
+                    "departure_station": "ADD",
+                    "destination_station": "DXB",
+                }
+            }
+
+
 class TurbulencePredictionResponse(BaseModel):
     """FTIS prediction response returned by the production endpoint."""
 
@@ -124,7 +164,7 @@ class TurbulencePredictionResponse(BaseModel):
 class BatchPredictionRequest(BaseModel):
     """Batch prediction payload for operational route or replay scoring."""
 
-    records: list[TurbulencePredictionRequest] = Field(
+    records: list[TurbulencePredictionRequest | StationPredictionRequest] = Field(
         ...,
         min_items=1,
         max_items=500,
