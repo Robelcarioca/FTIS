@@ -12,7 +12,7 @@ import math
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -53,6 +53,32 @@ class Station:
     def label(self) -> str:
         tag = "MAIN HUB" if self.station_type == "hub" else self.station_type.upper()
         return f"{self.code} - {self.name} [{tag}]"
+
+
+@dataclass
+class BackendStatus:
+    status: str = "OFFLINE"
+    version: str = "N/A"
+    model_version: str = "N/A"
+    latency_ms: float | None = None
+    backend_url: str = DEVELOPMENT_BACKEND_URL
+    health: dict[str, Any] = field(default_factory=dict)
+    system: dict[str, Any] = field(default_factory=dict)
+    model: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "version": self.version,
+            "model_version": self.model_version,
+            "latency_ms": self.latency_ms,
+            "backend_url": self.backend_url,
+            "health": self.health,
+            "system": self.system,
+            "model": self.model,
+            "errors": self.errors,
+        }
 
 
 STATIONS: dict[str, Station] = {
@@ -128,6 +154,10 @@ def prediction_endpoint(backend_url: str) -> str:
     return f"{normalize_backend_url(backend_url)}/predict"
 
 
+def endpoint_url(backend_url: str, path: str) -> str:
+    return f"{normalize_backend_url(backend_url)}/{path.lstrip('/')}"
+
+
 def backend_base_url(backend_url: str) -> str:
     parsed = urlparse(normalize_backend_url(backend_url))
     if not parsed.scheme or not parsed.netloc:
@@ -135,59 +165,101 @@ def backend_base_url(backend_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def backend_get_json(backend_url: str, path: str, *, timeout: float = 4.0) -> tuple[dict[str, Any], float]:
+    url = endpoint_url(backend_url, path)
+    started = time.perf_counter()
+    response = requests.get(url, timeout=timeout)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise PredictionClientError(f"Backend returned non-JSON response from {path}") from exc
+    return payload, latency_ms
+
+
+def backend_post_json(
+    backend_url: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 8.0,
+) -> tuple[dict[str, Any], float, int]:
+    url = endpoint_url(backend_url, path)
+    started = time.perf_counter()
+    response = requests.post(url, json=payload, timeout=timeout)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    status_code = response.status_code
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise PredictionClientError(f"Backend returned non-JSON response from {path}") from exc
+    return data, latency_ms, status_code
+
+
 def system_status(backend_url: str) -> dict[str, Any]:
     base_url = backend_base_url(backend_url)
     if not base_url:
-        return {
-            "status": "OFFLINE",
-            "version": "N/A",
-            "model_version": "N/A",
-            "latency_ms": None,
-            "message": "Invalid BACKEND_URL",
-        }
+        return BackendStatus(
+            status="OFFLINE",
+            version="N/A",
+            model_version="N/A",
+            latency_ms=None,
+            backend_url=base_url,
+            errors=["Invalid BACKEND_URL"],
+        ).as_dict()
 
-    for endpoint in ("/system/status", "/health"):
-        try:
-            started = time.perf_counter()
-            response = requests.get(f"{base_url}{endpoint}", timeout=2.5)
-            latency_ms = round((time.perf_counter() - started) * 1000, 1)
-            if response.ok:
-                payload = response.json()
-                model = payload.get("model", {})
-                model_version = (
-                    model.get("artifact_version")
-                    if isinstance(model, dict)
-                    else payload.get("model_version")
-                )
-                raw_status = str(payload.get("status", "ONLINE")).upper()
-                if raw_status in {"HEALTHY", "ONLINE", "OK", "RUNNING"}:
-                    status = "ONLINE"
-                elif raw_status in {"DEGRADED", "WARNING"}:
-                    status = "DEGRADED"
-                else:
-                    status = "DEGRADED"
-                return {
-                    "status": status,
-                    "version": str(payload.get("version", "2.0")),
-                    "model_version": str(model_version or payload.get("model", "active")),
-                    "latency_ms": latency_ms,
-                    "message": f"Health check passed at {endpoint}",
-                }
-            logger.warning(
-                "Backend health endpoint returned non-OK status url=%s status_code=%s",
-                f"{base_url}{endpoint}",
-                response.status_code,
-            )
-        except requests.RequestException as exc:
-            logger.warning("Backend health check failed url=%s error=%s", f"{base_url}{endpoint}", exc)
-            continue
-    return {
-        "status": "OFFLINE",
-        "version": "N/A",
-        "model_version": "N/A",
-        "latency_ms": None,
-        "message": "Backend health check failed",
-    }
+    status = BackendStatus(backend_url=base_url)
+    try:
+        health, latency_ms = backend_get_json(base_url, "/health", timeout=3.0)
+        status.health = health
+        status.latency_ms = latency_ms
+        status.status = "ONLINE"
+        status.version = str(health.get("version", "2.0"))
+        if not bool(health.get("model_available", True)):
+            status.status = "DEGRADED"
+            status.errors.append("Health endpoint reports model unavailable")
+    except requests.RequestException as exc:
+        logger.exception("Backend /health check failed backend_url=%s", base_url)
+        status.errors.append(f"/health failed: {exc}")
+        return status.as_dict()
+    except PredictionClientError as exc:
+        logger.exception("Backend /health response parse failed backend_url=%s", base_url)
+        status.status = "DEGRADED"
+        status.errors.append(str(exc))
+
+    try:
+        system_payload, system_latency = backend_get_json(base_url, "/system/status", timeout=4.0)
+        status.system = system_payload
+        status.latency_ms = min(
+            value for value in [status.latency_ms, system_latency] if value is not None
+        )
+        raw_status = str(system_payload.get("status", "healthy")).upper()
+        if raw_status not in {"HEALTHY", "ONLINE", "OK", "RUNNING"}:
+            status.status = "DEGRADED"
+    except Exception as exc:
+        logger.exception("Backend /system/status check failed backend_url=%s", base_url)
+        status.status = "DEGRADED"
+        status.errors.append(f"/system/status failed: {exc}")
+
+    try:
+        model_payload, _ = backend_get_json(base_url, "/model/metrics", timeout=5.0)
+        status.model = model_payload
+        model = model_payload.get("model", {})
+        status.model_version = str(
+            model.get("artifact_version")
+            or model.get("model_name")
+            or status.health.get("model_version")
+            or "active"
+        )
+    except Exception as exc:
+        logger.exception("Backend /model/metrics check failed backend_url=%s", base_url)
+        status.status = "DEGRADED"
+        status.errors.append(f"/model/metrics failed: {exc}")
+        status.model_version = str(status.health.get("model_version") or "active")
+
+    return status.as_dict()
 
 
 def station_by_label(label: str) -> Station:
@@ -249,12 +321,17 @@ def normalize_prediction(payload: dict[str, Any]) -> dict[str, Any]:
         normalized_risk = "UNKNOWN"
 
     probability = payload.get("probability", payload.get("confidence", 0.0))
+    confidence = payload.get("confidence", probability)
     risk_score = payload.get("risk_score", payload.get("FTI", payload.get("fti", 0.0)))
 
     try:
         probability = float(probability)
     except (TypeError, ValueError):
         probability = 0.0
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = probability
 
     try:
         risk_score = float(risk_score)
@@ -264,7 +341,10 @@ def normalize_prediction(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "risk_level": normalized_risk,
         "probability": clamp(probability, 0.0, 1.0),
+        "confidence": clamp(confidence, 0.0, 1.0),
         "risk_score": clamp(risk_score, 0.0, 100.0),
+        "recommendation": payload.get("recommendation"),
+        "probabilities": payload.get("probabilities", {}),
         "raw": payload,
     }
 
@@ -318,6 +398,69 @@ def call_prediction_backend(
         ) from exc
 
     return normalize_prediction(payload), latency_ms
+
+
+def call_route_analysis_backend(
+    backend_url: str,
+    departure: Station,
+    destination: Station,
+    altitude: float,
+    speed: float,
+) -> dict[str, Any] | None:
+    """Fetch route intelligence from the backend without blocking prediction success."""
+
+    payload = {
+        "departure_airport": departure.code,
+        "destination_airport": destination.code,
+        "cruising_altitude_m": altitude,
+        "aircraft_speed_kt": speed,
+        "waypoint_count": 36,
+        "use_live_weather": False,
+    }
+    try:
+        data, _, _ = backend_post_json(backend_url, "/route/analyze", payload, timeout=12.0)
+        return data
+    except Exception as exc:
+        logger.exception("Route analysis backend request failed")
+        st.session_state["route_error"] = f"Route intelligence unavailable: {exc}"
+        return None
+
+
+def call_weather_backend(
+    backend_url: str,
+    departure: Station,
+    destination: Station,
+    altitude: float,
+) -> dict[str, Any] | None:
+    """Fetch midpoint live-weather intelligence from the backend."""
+
+    payload = {
+        "latitude": (departure.latitude + destination.latitude) / 2,
+        "longitude": (departure.longitude + destination.longitude) / 2,
+        "altitude_m": altitude,
+    }
+    try:
+        data, _, _ = backend_post_json(backend_url, "/weather/live", payload, timeout=4.0)
+        return data
+    except Exception as exc:
+        logger.exception("Weather intelligence backend request failed")
+        st.session_state["weather_error"] = f"Live weather unavailable: {exc}"
+        return None
+
+
+def weather_from_route_analysis(route_analysis: dict[str, Any] | None) -> dict[str, Any] | None:
+    frame = route_analysis_frame(route_analysis)
+    if frame.empty:
+        return None
+    midpoint = frame.iloc[len(frame) // 2]
+    return {
+        "provider": midpoint.get("provider", "route_weather"),
+        "wind_speed_kmh": midpoint.get("wind_speed_kmh"),
+        "temperature_c": midpoint.get("temperature_c"),
+        "pressure_hpa": midpoint.get("pressure_hpa"),
+        "turbulence_indicator": midpoint.get("turbulence_indicator") or midpoint.get("FTI"),
+        "source": "route_analysis",
+    }
 
 
 def safe_route_recommendation(
@@ -419,6 +562,129 @@ def route_figure(route_codes: list[str], risk_level: str) -> go.Figure:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#e5edf7"),
+    )
+    return fig
+
+
+def route_analysis_frame(route_analysis: dict[str, Any] | None) -> pd.DataFrame:
+    if not route_analysis:
+        return pd.DataFrame()
+    waypoints = (route_analysis.get("analysis") or {}).get("waypoints", [])
+    if not waypoints:
+        return pd.DataFrame()
+    return pd.DataFrame(waypoints)
+
+
+def operational_route_figure(
+    route_codes: list[str],
+    risk_level: str,
+    route_analysis: dict[str, Any] | None,
+) -> go.Figure:
+    frame = route_analysis_frame(route_analysis)
+    if frame.empty or not {"latitude", "longitude"}.issubset(frame.columns):
+        return route_figure(route_codes, risk_level)
+
+    risks = frame.get("risk", pd.Series(["UNKNOWN"] * len(frame))).astype(str).str.upper()
+    colors = [RISK_COLORS.get(risk, RISK_COLORS["UNKNOWN"]) for risk in risks]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scattergeo(
+            lon=frame["longitude"],
+            lat=frame["latitude"],
+            mode="lines+markers",
+            line=dict(width=3, color=RISK_COLORS.get(risk_level, "#38bdf8")),
+            marker=dict(
+                size=(frame.get("FTI", pd.Series([30] * len(frame))).astype(float) / 12 + 5),
+                color=colors,
+                line=dict(width=1, color="#e5edf7"),
+            ),
+            hovertext=[
+                f"{row.get('waypoint_id', 'WP')} | {row.get('risk', 'UNKNOWN')} | FTI {float(row.get('FTI', 0)):.1f}"
+                for _, row in frame.iterrows()
+            ],
+            hoverinfo="text",
+        )
+    )
+    for code in route_codes:
+        station = STATIONS.get(code)
+        if station:
+            fig.add_trace(
+                go.Scattergeo(
+                    lon=[station.longitude],
+                    lat=[station.latitude],
+                    mode="markers+text",
+                    text=[station.code],
+                    textposition="top center",
+                    marker=dict(size=14, color="#38bdf8", symbol="star"),
+                    hovertext=[station.name],
+                    hoverinfo="text",
+                    showlegend=False,
+                )
+            )
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#111827",
+        showocean=True,
+        oceancolor="#050914",
+        showcountries=True,
+        countrycolor="#334155",
+        lataxis_range=[-10, 55],
+        lonaxis_range=[20, 65],
+    )
+    fig.update_layout(
+        height=405,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e5edf7"),
+        showlegend=False,
+    )
+    return fig
+
+
+def route_profile_figure(route_analysis: dict[str, Any] | None) -> go.Figure:
+    frame = route_analysis_frame(route_analysis)
+    fig = go.Figure()
+    if frame.empty:
+        fig.add_annotation(
+            text="Route intelligence awaiting mission scan",
+            showarrow=False,
+            font=dict(color="#94a3b8", size=14),
+        )
+    else:
+        x_values = frame.get("distance_from_origin_nm", pd.Series(range(len(frame))))
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=frame.get("FTI", pd.Series([0] * len(frame))),
+                mode="lines+markers",
+                name="FTI",
+                line=dict(color="#f97316", width=3),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=frame.get("wind_speed_kmh", pd.Series([0] * len(frame))),
+                mode="lines",
+                name="Wind km/h",
+                line=dict(color="#38bdf8", width=2),
+                yaxis="y2",
+            )
+        )
+    fig.add_hrect(y0=66, y1=100, fillcolor="rgba(239,68,68,0.10)", line_width=0)
+    fig.add_hrect(y0=33, y1=66, fillcolor="rgba(250,204,21,0.08)", line_width=0)
+    fig.update_layout(
+        height=260,
+        margin=dict(l=12, r=12, t=20, b=12),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e5edf7"),
+        yaxis=dict(title="FTI", range=[0, 100], gridcolor="rgba(148,163,184,0.16)"),
+        yaxis2=dict(title="Wind", overlaying="y", side="right", showgrid=False),
+        xaxis=dict(title="Distance (NM)", gridcolor="rgba(148,163,184,0.08)"),
+        legend=dict(orientation="h", y=1.16),
     )
     return fig
 
@@ -552,6 +818,12 @@ def apply_css() -> None:
             padding: 1rem;
             min-height: 100%;
         }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.65rem;
+            margin-bottom: 0.9rem;
+        }
         .panel-title {
             color: #f8fafc;
             font-weight: 800;
@@ -604,13 +876,17 @@ def apply_css() -> None:
 def initialize_state() -> None:
     st.session_state.setdefault("last_prediction", None)
     st.session_state.setdefault("last_recommendation", None)
+    st.session_state.setdefault("route_analysis", None)
+    st.session_state.setdefault("weather_snapshot", None)
     st.session_state.setdefault("api_latency_ms", None)
     st.session_state.setdefault("risk_history", [])
     st.session_state.setdefault("backend_error", None)
+    st.session_state.setdefault("route_error", None)
+    st.session_state.setdefault("weather_error", None)
 
 
 def render_top_bar(status: dict[str, Any]) -> None:
-    api_latency = st.session_state.get("api_latency_ms")
+    api_latency = st.session_state.get("api_latency_ms") or status.get("latency_ms")
     latency_label = f"{api_latency:.1f} ms" if api_latency is not None else "STANDBY"
     status_text = status.get("status", "DEGRADED")
     status_color = (
@@ -677,6 +953,28 @@ def main() -> None:
 
     status = system_status(backend_url)
     render_top_bar(status)
+    health_color = (
+        RISK_COLORS["LOW"]
+        if status["status"] == "ONLINE"
+        else RISK_COLORS["MODERATE"]
+        if status["status"] == "DEGRADED"
+        else RISK_COLORS["HIGH"]
+    )
+    st.markdown(
+        '<div class="metric-grid">'
+        + metric_card("Backend", status["status"], health_color)
+        + metric_card("Active URL", status["backend_url"], "#38bdf8")
+        + metric_card(
+            "Health Latency",
+            f"{status['latency_ms']:.1f} ms" if status.get("latency_ms") is not None else "No signal",
+            "#e5edf7",
+        )
+        + metric_card("Model Version", status.get("model_version", "active"), "#e5edf7")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if status.get("errors"):
+        st.warning("Backend partial service warning: " + " | ".join(status["errors"][:2]))
 
     col_input, col_prediction, col_recommendation = st.columns([1.05, 1.05, 1.2])
 
@@ -710,6 +1008,8 @@ def main() -> None:
             st.session_state["backend_error"] = "Departure and destination stations must be different."
         else:
             try:
+                st.session_state["route_error"] = None
+                st.session_state["weather_error"] = None
                 prediction, latency_ms = call_prediction_backend(
                     backend_url,
                     departure,
@@ -723,10 +1023,25 @@ def main() -> None:
                     departure,
                     destination,
                     prediction["risk_level"],
-                    prediction["probability"],
+                    prediction["confidence"],
                 )
+                route_analysis = call_route_analysis_backend(
+                    backend_url,
+                    departure,
+                    destination,
+                    altitude,
+                    speed,
+                )
+                weather_snapshot = call_weather_backend(
+                    backend_url,
+                    departure,
+                    destination,
+                    altitude,
+                ) or weather_from_route_analysis(route_analysis)
                 st.session_state["last_prediction"] = prediction
                 st.session_state["last_recommendation"] = recommendation
+                st.session_state["route_analysis"] = route_analysis
+                st.session_state["weather_snapshot"] = weather_snapshot
                 st.session_state["api_latency_ms"] = latency_ms
                 st.session_state["backend_error"] = None
                 st.session_state["risk_history"].append(
@@ -742,9 +1057,13 @@ def main() -> None:
                 st.session_state["backend_error"] = str(exc)
                 st.session_state["last_prediction"] = None
                 st.session_state["last_recommendation"] = None
+                st.session_state["route_analysis"] = None
+                st.session_state["weather_snapshot"] = None
 
     prediction = st.session_state.get("last_prediction")
     recommendation = st.session_state.get("last_recommendation")
+    route_analysis = st.session_state.get("route_analysis")
+    weather_snapshot = st.session_state.get("weather_snapshot")
     backend_error = st.session_state.get("backend_error")
 
     with col_prediction:
@@ -760,6 +1079,10 @@ def main() -> None:
             st.markdown(metric_card("Risk Level", risk, color), unsafe_allow_html=True)
             st.markdown(
                 metric_card("Probability", f"{prediction['probability'] * 100:.1f}%", "#38bdf8"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                metric_card("Confidence", f"{prediction['confidence'] * 100:.1f}%", "#22c55e"),
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -827,10 +1150,14 @@ def main() -> None:
             )
         telemetry = pd.DataFrame(
             [
-                {"Channel": "ADS-B Link", "Value": "Nominal"},
-                {"Channel": "Weather Feed", "Value": "Backend Routed"},
+                {"Channel": "Backend", "Value": status["status"]},
+                {"Channel": "Health Endpoint", "Value": "/health OK" if status.get("health") else "No signal"},
+                {"Channel": "Prediction Endpoint", "Value": "/predict"},
+                {"Channel": "Route Endpoint", "Value": "/route/analyze" if route_analysis else st.session_state.get("route_error", "Standby")},
+                {"Channel": "Weather Feed", "Value": weather_snapshot.get("provider", "Standby") if weather_snapshot else st.session_state.get("weather_error", "Standby")},
                 {"Channel": "Station Pair", "Value": f"{departure.code}-{destination.code}"},
                 {"Channel": "Aircraft Profile", "Value": f"{speed} kt / {altitude} m"},
+                {"Channel": "Last Update", "Value": datetime.now().strftime("%H:%M:%S")},
             ]
         )
         st.dataframe(telemetry, use_container_width=True, hide_index=True)
@@ -846,12 +1173,62 @@ def main() -> None:
     bottom_left, bottom_right = st.columns([1.45, 1])
     with bottom_left:
         st.markdown('<div class="glass-panel"><div class="panel-title">Flight Route Visualization</div>', unsafe_allow_html=True)
-        st.plotly_chart(route_figure(route_codes, route_risk), use_container_width=True)
+        st.plotly_chart(
+            operational_route_figure(route_codes, route_risk, route_analysis),
+            use_container_width=True,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     with bottom_right:
         st.markdown('<div class="glass-panel"><div class="panel-title">Risk Trend Chart</div>', unsafe_allow_html=True)
         st.plotly_chart(risk_trend_figure(st.session_state["risk_history"]), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    intel_left, intel_right = st.columns([1.25, 1])
+    with intel_left:
+        st.markdown('<div class="glass-panel"><div class="panel-title">Turbulence Corridor Intelligence</div>', unsafe_allow_html=True)
+        st.plotly_chart(route_profile_figure(route_analysis), use_container_width=True)
+        if route_analysis:
+            analysis = route_analysis.get("analysis", {})
+            corridor_count = len(analysis.get("turbulence_corridors", []))
+            st.markdown(
+                '<div class="metric-grid">'
+                + metric_card("Route Risk", str(analysis.get("route_risk", "UNKNOWN")).upper(), RISK_COLORS.get(str(analysis.get("route_risk", "UNKNOWN")).upper(), "#94a3b8"))
+                + metric_card("Cumulative FTI", f"{float(analysis.get('cumulative_fti', 0)):.1f}", "#f97316")
+                + metric_card("Distance", f"{float(analysis.get('route_distance_nm', 0)):.0f} NM", "#e5edf7")
+                + metric_card("Corridors", str(corridor_count), "#38bdf8")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.get("route_error"):
+            st.warning(st.session_state["route_error"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with intel_right:
+        st.markdown('<div class="glass-panel"><div class="panel-title">Weather Integration Display</div>', unsafe_allow_html=True)
+        if weather_snapshot:
+            st.markdown(
+                metric_card("Provider", str(weather_snapshot.get("provider", "UNKNOWN")), "#38bdf8"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                metric_card("Wind", f"{float(weather_snapshot.get('wind_speed_kmh') or 0):.1f} km/h", "#e5edf7"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                metric_card("Temperature", f"{float(weather_snapshot.get('temperature_c') or 0):.1f} C", "#e5edf7"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                metric_card("Turbulence Indicator", f"{float(weather_snapshot.get('turbulence_indicator') or 0):.1f}", "#f97316"),
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.get("weather_error"):
+            st.warning(st.session_state["weather_error"])
+        else:
+            st.markdown(metric_card("Provider", "Standby", "#94a3b8"), unsafe_allow_html=True)
+            st.markdown(metric_card("Wind", "Awaiting scan", "#94a3b8"), unsafe_allow_html=True)
+            st.markdown(metric_card("Turbulence Indicator", "Awaiting scan", "#94a3b8"), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
 
